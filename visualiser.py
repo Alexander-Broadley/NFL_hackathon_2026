@@ -3,7 +3,7 @@
 NFL Big Data Bowl play visualiser.
 
 A small Dash web app that animates player tracking data from
-./nfl-big-data-bowl-regional-event-data/data/tracking/ over all frames of a
+./data/tracking/ over all frames of a
 chosen play. Players are drawn as coloured markers by team (one colour per
 team on the play); the ball is a brown diamond. Jersey numbers are printed on
 each player, and a short tick shows each player's orientation.
@@ -50,7 +50,7 @@ if _missing:
     )
 
 # ---- paths and field constants --------------------------------------------
-DATA = Path(__file__).resolve().parent / "nfl-big-data-bowl-regional-event-data" / "data"
+DATA = Path(__file__).resolve().parent / "data"
 TRACKING_DIR = DATA / "tracking"
 PLAYS_CSV = DATA / "plays.csv"
 GAMES_CSV = DATA / "games.csv"

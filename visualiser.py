@@ -113,7 +113,8 @@ def load_plays() -> pd.DataFrame:
     if PLAYS_CSV.exists():
         cols = ["gameId", "playId", "playDescription", "quarter",
                 "gameClock", "possessionTeam", "defensiveTeam",
-                "playResult", "prePenaltyPlayResult", "passResult"]
+                "playResult", "prePenaltyPlayResult", "passResult",
+                "absoluteYardlineNumber"]
         try:
             return pd.read_csv(PLAYS_CSV, usecols=cols)
         except ValueError:
@@ -262,6 +263,63 @@ def predicted_positions(game_id: str, play_id: int) -> pd.DataFrame | None:
     return out
 
 
+def predicted_play_result(game_id: str, play_id: int) -> int | None:
+    """Predicted net yards gained, derived geometrically from the LAST frame of
+    the simulated (model-rolled-out) play. None when it can't be computed.
+
+    The ball-carrier is approximated as the furthest-downfield offensive player
+    at the final simulated frame. 'Downfield' is the direction the offense is
+    driving, read off the play's playDirection. Yards = how far that player has
+    advanced past the line of scrimmage (absoluteYardlineNumber).
+
+    We work entirely in ORIGINAL (un-flipped) field coordinates: predicted_positions
+    returns original coords, and absoluteYardlineNumber is in the same 0-120 space,
+    so there is no normalised/original mixing. For a 'right' play the offense moves
+    toward +x, so yards = final_x - LOS_x; for a 'left' play it moves toward -x, so
+    yards = LOS_x - final_x.
+    """
+    if not predictions_available():
+        return None
+    pp = predicted_positions(game_id, play_id)
+    if pp is None or pp.empty:
+        return None
+
+    info = play_info(game_id, play_id)
+    los_x = info.get("absoluteYardlineNumber")
+    if los_x is None:
+        return None
+
+    # possession team code -> which nflIds are on offense for this play
+    pteam = _PRED["poss"].get((int(game_id), int(play_id)))
+    if pteam is None:
+        return None
+    tr = load_tracking(game_id)
+    play = tr[tr["playId"] == int(play_id)]
+    if play.empty:
+        return None
+    play_dir = play["playDirection"].iloc[0]
+    off_ids = set(
+        int(n) for n in play[play["team"] == pteam]["nflId"].dropna().unique()
+    )
+    if not off_ids:
+        return None
+
+    # last simulated frame, offensive players only
+    final_fid = int(pp["frameId"].max())
+    final = pp[(pp["frameId"] == final_fid) & (pp["nflId"].isin(off_ids))]
+    if final.empty:
+        return None
+
+    # furthest-downfield offensive player = ball-carrier approximation
+    if play_dir == "left":
+        carrier_x = float(final["px"].min())  # offense drives toward -x
+        yards = los_x - carrier_x
+    else:  # 'right' (default): offense drives toward +x
+        carrier_x = float(final["px"].max())
+        yards = carrier_x - los_x
+    return int(round(yards))
+
+
 def play_options(game_id: str) -> list[dict]:
     """Dropdown options for every play in a game, labelled from plays.csv."""
     df = load_tracking(game_id)
@@ -287,16 +345,18 @@ def play_info(game_id: str, play_id: int) -> dict:
       'prePenaltyPlayResult'  net yards before penalty yards (int or None)
       'passResult'            dropback outcome code C/I/S/IN/R (str or None)
       'playDescription'       play text (str or None)
+      'absoluteYardlineNumber' absolute x of the LOS in 0-120 coords (int/None)
     """
     info = {"playResult": None, "prePenaltyPlayResult": None,
-            "passResult": None, "playDescription": None}
+            "passResult": None, "playDescription": None,
+            "absoluteYardlineNumber": None}
     if PLAYS.empty:
         return info
     match = PLAYS[(PLAYS["gameId"] == int(game_id)) & (PLAYS["playId"] == int(play_id))]
     if match.empty:
         return info
     row = match.iloc[0]
-    for col in ("playResult", "prePenaltyPlayResult"):
+    for col in ("playResult", "prePenaltyPlayResult", "absoluteYardlineNumber"):
         if col in match.columns and pd.notna(row[col]):
             info[col] = int(row[col])
     if "passResult" in match.columns and pd.notna(row["passResult"]):
@@ -353,21 +413,45 @@ def _badge(label, value, cls):
     ])
 
 
-def _badges_children(game_id, play_id):
-    """Children for the outcome-badges row: pass result + two yardage figures."""
+def _badges_children(game_id, play_id, view_mode="actual"):
+    """Children for the outcome-badges row: pass result + two yardage figures.
+
+    When view_mode is 'pred' or 'both', two extra badges are appended that
+    surface the model's predicted net yards (from the final simulated frame)
+    and the signed delta against the actual play result (predicted minus
+    actual; positive = model over-predicted the gain). Badges are omitted
+    (never crash) when predictions or the inputs they need are unavailable.
+    """
     if game_id is None or play_id is None:
-        info = {"playResult": None, "prePenaltyPlayResult": None, "passResult": None}
+        info = {"playResult": None, "prePenaltyPlayResult": None,
+                "passResult": None}
     else:
         info = play_info(game_id, play_id)
 
     pass_val, pass_cls = _passresult_badge_parts(info["passResult"])
     pre_val, pre_cls = _yardage_badge_parts(info["prePenaltyPlayResult"])
     net_val, net_cls = _yardage_badge_parts(info["playResult"])
-    return [
+    children = [
         _badge("Pass result", pass_val, pass_cls),
         _badge("Pre-penalty", pre_val, pre_cls),
         _badge("Play result", net_val, net_cls),
     ]
+
+    if view_mode in ("pred", "both") and game_id is not None and play_id is not None:
+        try:
+            pred = predicted_play_result(game_id, play_id)
+        except Exception:  # pragma: no cover - defensive, never break the UI
+            pred = None
+        if pred is not None:
+            pred_val, pred_cls = _yardage_badge_parts(pred)
+            children.append(_badge("Predicted result", pred_val, pred_cls))
+            actual = info["playResult"]
+            if actual is not None:
+                delta_val, delta_cls = _yardage_badge_parts(pred - actual)
+            else:
+                delta_val, delta_cls = _yardage_badge_parts(None)
+            children.append(_badge("Pred vs actual", delta_val, delta_cls))
+    return children
 
 
 # ---- figure building --------------------------------------------------------
@@ -999,7 +1083,7 @@ def _update_figure(game_id, play_id, view_mode):
                 _split_badge_children(None))
     mode = view_mode if view_mode in ("actual", "pred", "both") else "actual"
     return (build_figure(game_id, int(play_id), mode=mode),
-            _badges_children(game_id, play_id),
+            _badges_children(game_id, play_id, view_mode=mode),
             _split_badge_children(game_id))
 
 

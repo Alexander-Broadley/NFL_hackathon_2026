@@ -60,21 +60,28 @@ FIELD_WIDTH = 53.3     # yards (field is 160 ft wide)
 HASH_FROM_SIDELINE = 23.36667  # NFL hash marks ~23 yd 4 in from each sideline
 
 BALL_LABEL = "football"
-TEAM_COLORS = ["#38bdf8", "#fb7185"]  # team A (cyan), team B (rose)
-BALL_COLOR = "#d9a066"
+# Team markers use the two NFL brand accents (red + blue) off the Shield palette.
+TEAM_COLORS = ["#d50a0a", "#4b92db"]  # team A (NFL red), team B (NFL blue)
+BALL_COLOR = "#a0522d"  # football leather brown
 
-# ---- dark theme palette ----------------------------------------------------
-BG_PAGE = "#0b0f17"        # page background (darkest)
-BG_SURFACE = "#141b26"     # card / island surface
-BG_SURFACE_2 = "#1c2634"   # inputs, raised elements
-BORDER = "#263142"         # hairline borders
-TEXT = "#e6edf3"           # primary text
-TEXT_MUTED = "#8b98a9"     # secondary text
-ACCENT = "#38bdf8"         # accent (cyan)
+# ---- NFL "Shield" brand palette --------------------------------------------
+# Grounded in the official NFL identity: deep navy, NFL red and white, on a
+# dark surface so the Big Data Bowl tracking data stays the focus.
+NFL_NAVY = "#013369"       # primary NFL navy (the Shield blue)
+NFL_RED = "#d50a0a"        # primary NFL red
+NFL_BLUE = "#4b92db"       # secondary NFL blue accent
 
-FIELD_GREEN = "#17352a"    # muted dark-teal turf (fits dark theme)
-FIELD_ENDZONE = "#102a22"  # slightly darker end zones
-FIELD_LINE = "#3f5e54"     # subtle field lines on dark turf
+BG_PAGE = "#02172f"        # page background: deep navy black
+BG_SURFACE = "#06244a"     # card / island surface: NFL navy
+BG_SURFACE_2 = "#0a3161"   # inputs, raised elements
+BORDER = "#1b4a86"         # hairline borders (navy tint)
+TEXT = "#ffffff"           # primary text (NFL white)
+TEXT_MUTED = "#9db6d8"     # secondary text (soft navy-tinted)
+ACCENT = "#d50a0a"         # accent: NFL red
+
+FIELD_GREEN = "#123a24"    # turf green on the dark navy field
+FIELD_ENDZONE = "#0d2d1b"  # slightly darker end zones
+FIELD_LINE = "#4a7a5c"     # subtle field lines on turf
 
 
 # ---- data loading ----------------------------------------------------------
@@ -405,7 +412,7 @@ def build_figure(game_id: str, play_id: int) -> go.Figure:
         shapes=field_shapes(),
         annotations=yardline_annotations(),
         plot_bgcolor=BG_SURFACE, paper_bgcolor=BG_SURFACE,
-        height=560, margin=dict(l=10, r=10, t=50, b=10),
+        height=560, margin=dict(l=10, r=10, t=64, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="right", x=1, font=dict(color=TEXT),
                     bgcolor="rgba(0,0,0,0)"),
@@ -431,12 +438,14 @@ def build_figure(game_id: str, play_id: int) -> go.Figure:
 
 def _title(game_id, play_id, fid, nframes, extra, result="") -> str:
     res = f"  ·  {result}" if result else ""
-    return (f"Game {game_id} — Play {play_id} — frame {fid}/{nframes}{res}{extra}")
+    return (f"Game {game_id} — Play {play_id} — frame {fid}/{nframes}{res}{extra}"
+            "<br><span style='font-size:11px;color:#9db6d8'>"
+            "NFL Big Data Bowl · Next Gen Stats</span>")
 
 
 # ---- Dash app ---------------------------------------------------------------
 app = Dash(__name__)
-app.title = "NFL Play Visualiser"
+app.title = "NFL Big Data Bowl · Play Visualiser"
 
 # Global dark theme + card styling. Injected at the page level so the dropdown
 # menus, scrollbars and body background are themed too, not just components.
@@ -449,29 +458,60 @@ app.index_string = """<!DOCTYPE html>
     {%css%}
     <style>
         :root {
-            --bg-page: #0b0f17;
-            --bg-surface: #141b26;
-            --bg-surface-2: #1c2634;
-            --border: #263142;
-            --text: #e6edf3;
-            --text-muted: #8b98a9;
-            --accent: #38bdf8;
+            --nfl-navy: #013369;
+            --nfl-red: #d50a0a;
+            --nfl-blue: #4b92db;
+            --bg-page: #02172f;
+            --bg-surface: #06244a;
+            --bg-surface-2: #0a3161;
+            --border: #1b4a86;
+            --text: #ffffff;
+            --text-muted: #9db6d8;
+            --accent: #d50a0a;
         }
         * { box-sizing: border-box; }
         body {
             margin: 0;
             background:
-                radial-gradient(1200px 600px at 15% -10%, #16202e 0%, rgba(22,32,46,0) 60%),
-                radial-gradient(1000px 500px at 110% 10%, #10212b 0%, rgba(16,33,43,0) 55%),
+                radial-gradient(1200px 600px at 15% -10%, #0a3161 0%, rgba(10,49,97,0) 60%),
+                radial-gradient(1000px 500px at 110% 10%, #013369 0%, rgba(1,51,105,0) 55%),
                 var(--bg-page);
             color: var(--text);
             font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
             -webkit-font-smoothing: antialiased;
         }
         .app-shell { max-width: 1120px; margin: 0 auto; padding: 32px 20px 48px; }
-        .app-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 22px; }
-        .app-title { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; margin: 0; }
+        .app-header {
+            display: flex; align-items: center; gap: 16px; margin-bottom: 22px;
+            padding-bottom: 18px; border-bottom: 1px solid var(--border);
+        }
+        /* NFL Shield mark rendered inline, no external asset required */
+        .nfl-shield {
+            flex: 0 0 auto; width: 40px; height: 52px; border-radius: 6px 6px 10px 10px;
+            background: linear-gradient(180deg, var(--nfl-navy) 0%, #012349 100%);
+            border: 2px solid #ffffff;
+            display: flex; align-items: center; justify-content: center;
+            color: #ffffff; font-weight: 800; font-size: 14px; letter-spacing: 0.04em;
+            box-shadow: 0 4px 14px rgba(1,51,105,0.6);
+            clip-path: polygon(0 0, 100% 0, 100% 68%, 50% 100%, 0 68%);
+        }
+        .app-headings { display: flex; flex-direction: column; gap: 2px; }
+        .app-eyebrow {
+            font-size: 11px; font-weight: 700; letter-spacing: 0.14em;
+            text-transform: uppercase; color: var(--nfl-red); margin: 0;
+        }
+        .app-title {
+            font-size: 24px; font-weight: 800; letter-spacing: -0.01em; margin: 0;
+            text-transform: uppercase;
+        }
         .app-subtitle { font-size: 13px; color: var(--text-muted); margin: 0; }
+        /* footer attribution */
+        .app-footer {
+            margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--border);
+            display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+            font-size: 11px; color: var(--text-muted); letter-spacing: 0.02em;
+        }
+        .app-footer strong { color: var(--text); font-weight: 700; }
         .card {
             background: var(--bg-surface);
             border: 1px solid var(--border);
@@ -519,7 +559,7 @@ app.index_string = """<!DOCTYPE html>
             color: var(--text) !important;
         }
         .VirtualizedSelectFocusedOption, .Select-option.is-focused {
-            background: #223047 !important;
+            background: #0f3d75 !important;
         }
         .Select-arrow { border-color: var(--text-muted) transparent transparent; }
 
@@ -536,11 +576,11 @@ app.index_string = """<!DOCTYPE html>
             text-transform: uppercase; color: var(--text-muted);
         }
         .result-value { font-size: 20px; font-weight: 700; line-height: 1.1; }
-        .result-gain { color: #4ade80; }   /* green for positive yards */
-        .result-loss { color: #fb7185; }   /* rose for negative yards */
+        .result-gain { color: #35b35a; }   /* green for positive yards */
+        .result-loss { color: var(--nfl-red); }   /* NFL red for negative yards */
         .result-zero { color: var(--text-muted); }
         ::-webkit-scrollbar { width: 10px; height: 10px; }
-        ::-webkit-scrollbar-thumb { background: #2a3647; border-radius: 8px; }
+        ::-webkit-scrollbar-thumb { background: #0f3d75; border-radius: 8px; }
         ::-webkit-scrollbar-track { background: transparent; }
     </style>
 </head>
@@ -560,9 +600,16 @@ app.layout = html.Div(
         html.Div(
             className="app-header",
             children=[
-                html.H1("NFL Play Visualiser", className="app-title"),
-                html.P("Big Data Bowl — player tracking, frame by frame",
-                       className="app-subtitle"),
+                html.Div("NFL", className="nfl-shield"),
+                html.Div(
+                    className="app-headings",
+                    children=[
+                        html.P("Big Data Bowl", className="app-eyebrow"),
+                        html.H1("Play Visualiser", className="app-title"),
+                        html.P("Next Gen Stats player tracking — frame by frame",
+                               className="app-subtitle"),
+                    ],
+                ),
             ],
         ),
         # controls island
@@ -623,6 +670,17 @@ app.layout = html.Div(
                         html.Span("Press ▶ Play to animate · tick = player orientation"),
                     ],
                 ),
+            ],
+        ),
+        # footer attribution
+        html.Div(
+            className="app-footer",
+            children=[
+                html.Span(children=[
+                    html.Strong("NFL Big Data Bowl"),
+                    " · player tracking visualisation",
+                ]),
+                html.Span("Powered by AWS · Next Gen Stats"),
             ],
         ),
     ],

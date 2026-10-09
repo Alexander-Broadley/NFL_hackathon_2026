@@ -17,6 +17,7 @@ exact conda command to install them into the active environment and exits.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -60,21 +61,26 @@ FIELD_WIDTH = 53.3     # yards (field is 160 ft wide)
 HASH_FROM_SIDELINE = 23.36667  # NFL hash marks ~23 yd 4 in from each sideline
 
 BALL_LABEL = "football"
-TEAM_COLORS = ["#38bdf8", "#fb7185"]  # team A (cyan), team B (rose)
-BALL_COLOR = "#d9a066"
+# teams drawn in the two NFL shield colours (blue vs red)
+TEAM_COLORS = ["#013369", "#D50A0A"]  # team A (shield blue), team B (shield red)
+BALL_COLOR = "#8B4513"                # brown football
 
-# ---- dark theme palette ----------------------------------------------------
-BG_PAGE = "#0b0f17"        # page background (darkest)
-BG_SURFACE = "#141b26"     # card / island surface
-BG_SURFACE_2 = "#1c2634"   # inputs, raised elements
-BORDER = "#263142"         # hairline borders
-TEXT = "#e6edf3"           # primary text
-TEXT_MUTED = "#8b98a9"     # secondary text
-ACCENT = "#38bdf8"         # accent (cyan)
+# ---- NFL Big Data Bowl brand palette ---------------------------------------
+# Anchored on the official NFL shield colours: blue #013369, red #D50A0A, white.
+NFL_BLUE = "#013369"       # NFL Shield Blue (primary brand colour)
+NFL_RED = "#D50A0A"        # NFL Shield Red (accent brand colour)
 
-FIELD_GREEN = "#17352a"    # muted dark-teal turf (fits dark theme)
-FIELD_ENDZONE = "#102a22"  # slightly darker end zones
-FIELD_LINE = "#3f5e54"     # subtle field lines on dark turf
+BG_PAGE = "#f4f6f8"        # light page background
+BG_SURFACE = "#ffffff"     # card / island surface (white)
+BG_SURFACE_2 = "#ffffff"   # inputs (white, for black readable text)
+BORDER = "#d4dae2"         # hairline borders
+TEXT = "#0b1220"           # primary text (near-black, high contrast)
+TEXT_MUTED = "#5b6775"     # secondary text
+ACCENT = NFL_RED           # accent (NFL red)
+
+FIELD_GREEN = "#1a6b3c"    # classic turf green
+FIELD_ENDZONE = "#013369"  # end zones in NFL shield blue
+FIELD_LINE = "#ffffff"     # white field lines (standard NFL markings)
 
 
 # ---- data loading ----------------------------------------------------------
@@ -117,6 +123,143 @@ def load_plays() -> pd.DataFrame:
 
 PLAYS = load_plays()
 GAME_IDS = list_game_ids()
+
+
+# ---- prediction bridge ------------------------------------------------------
+# Reuse the trained XGBoost displacement models + rollout from predictor.py so
+# the overlay always matches the real model (no duplicated feature logic).
+REPO_DIR = Path(__file__).resolve().parent
+MODEL_DIR = REPO_DIR / "model_output"
+METRICS_JSON = MODEL_DIR / "metrics.json"
+
+_PRED = {"ok": False, "reason": "", "predictor": None, "models": None,
+         "players": None, "poss": None}
+_PRED_CACHE: dict[tuple, pd.DataFrame] = {}
+
+# game-level train/test split read from the model's metrics.json. A game can be
+# a TRAIN game (model learned from it), a TEST game (held out, truly unseen), or
+# UNSEEN (not part of the model's run at all - also never trained on, but not
+# the designated evaluation set either).
+_TRAIN_GAMES: set[str] = set()
+_TEST_GAMES: set[str] = set()
+
+
+def _load_split() -> None:
+    """Populate _TRAIN_GAMES / _TEST_GAMES from metrics.json (best effort)."""
+    if _TRAIN_GAMES or _TEST_GAMES:
+        return
+    if not METRICS_JSON.exists():
+        return
+    try:
+        m = json.loads(METRICS_JSON.read_text())
+        _TRAIN_GAMES.update(str(g) for g in m.get("train_games", []))
+        _TEST_GAMES.update(str(g) for g in m.get("test_games", []))
+    except Exception:
+        pass
+
+
+def game_split_label(game_id) -> str:
+    """'train', 'test', or 'unseen' for a given gameId."""
+    _load_split()
+    gid = str(game_id)
+    if gid in _TEST_GAMES:
+        return "test"
+    if gid in _TRAIN_GAMES:
+        return "train"
+    return "unseen"
+
+
+# display metadata per split state: (short label, long tooltip, colour)
+SPLIT_META = {
+    "train": ("TRAIN", "Model was trained on this game — predictions here are "
+                        "in-sample and will look optimistically good.",
+              "#fbbf24"),   # amber
+    "test":  ("TEST", "Held-out game the model never saw during training — "
+                      "this is an honest, out-of-sample prediction.",
+              "#4ade80"),   # green
+    "unseen": ("UNSEEN", "Not part of the model's train/test run. The model "
+                         "never trained on it, but it isn't the designated "
+                         "test set either.",
+               "#8b98a9"),  # grey
+}
+
+
+def _init_predictor() -> None:
+    """Lazy, best-effort load of predictor module + saved models. Failures are
+    captured in _PRED['reason'] so the UI can degrade gracefully."""
+    if _PRED["ok"] or _PRED["reason"]:
+        return
+    try:
+        sys.path.insert(0, str(REPO_DIR))
+        import predictor as _p  # noqa: E402
+        import xgboost as _xgb  # noqa: E402
+
+        dxp = MODEL_DIR / "model_dx.json"
+        dyp = MODEL_DIR / "model_dy.json"
+        if not (dxp.exists() and dyp.exists()):
+            _PRED["reason"] = "no saved model (run predictor.py first)"
+            return
+        mx, my = _xgb.XGBRegressor(), _xgb.XGBRegressor()
+        mx.load_model(dxp); my.load_model(dyp)
+        _PRED["predictor"] = _p
+        _PRED["models"] = {"global": {"dx": mx, "dy": my},
+                           "per_horizon": {}, "horizon_bins": None}
+        _PRED["players"] = _p.load_players()
+        plays = _p.load_plays()
+        _PRED["poss"] = {(int(r.gameId), int(r.playId)): r.possessionTeam
+                         for r in plays.itertuples(index=False)}
+        _PRED["ok"] = True
+    except Exception as e:  # pragma: no cover - defensive
+        _PRED["reason"] = f"predictor unavailable: {e}"
+
+
+def predictions_available() -> bool:
+    _init_predictor()
+    return _PRED["ok"]
+
+
+def predicted_positions(game_id: str, play_id: int) -> pd.DataFrame | None:
+    """Rolled-out predicted positions for a play, in ORIGINAL field coordinates
+    (un-flipped), keyed by nflId and frameId. None if unavailable.
+
+    Columns: nflId (Int64), frameId (int), px (float), py (float).
+    """
+    _init_predictor()
+    if not _PRED["ok"]:
+        return None
+    key = (str(game_id), int(play_id))
+    if key in _PRED_CACHE:
+        return _PRED_CACHE[key]
+
+    p = _PRED["predictor"]
+    pteam = _PRED["poss"].get((int(game_id), int(play_id)))
+    if pteam is None:
+        return None
+    tr = load_tracking(game_id)
+    play = tr[tr["playId"] == play_id]
+    if play.empty:
+        return None
+
+    tbl = p.build_play_table(play, _PRED["players"], pteam)
+    if tbl is None:
+        return None
+    roll = p.rollout_play(tbl, _PRED["models"], use_horizon=False)
+    roll = roll[roll["ekey"] != "BALL"].copy()
+
+    # predictor flips left-moving plays to +x; un-flip back to original coords.
+    play_dir = play["playDirection"].iloc[0]
+    px = roll["pred_x"].to_numpy()
+    py = roll["pred_y"].to_numpy()
+    if play_dir == "left":
+        px = FIELD_LENGTH - px
+        py = FIELD_WIDTH - py
+    out = pd.DataFrame({
+        "nflId": pd.to_numeric(roll["ekey"], errors="coerce").astype("Int64"),
+        "frameId": roll["frameId"].astype(int).to_numpy(),
+        "px": px, "py": py,
+    }).dropna(subset=["nflId"])
+    _PRED_CACHE[key] = out
+    return out
 
 
 def play_options(game_id: str) -> list[dict]:
@@ -282,7 +425,9 @@ def _orientation_segments(sub: pd.DataFrame, length: float = 1.8):
     return xs, ys
 
 
-def build_figure(game_id: str, play_id: int) -> go.Figure:
+def build_figure(game_id: str, play_id: int, mode: str = "actual") -> go.Figure:
+    """mode: 'actual' (tracking only), 'pred' (model's predicted play only),
+    or 'both' (actual solid + predicted ghost overlay)."""
     df = load_tracking(game_id)
     play = df[df["playId"] == play_id].copy()
     if play.empty:
@@ -291,6 +436,30 @@ def build_figure(game_id: str, play_id: int) -> go.Figure:
     play.sort_values(["frameId", "nflId"], inplace=True)
     frames_ids = sorted(play["frameId"].unique().tolist())
 
+    want_pred = mode in ("pred", "both")
+    pred_only = mode == "pred"
+
+    # predicted tracks: per-nflId/frame predicted x,y in original coords.
+    # pred_lookup[(nflId, frameId)] -> (px, py); pred_team: nflId -> team code.
+    pred_lookup: dict[tuple, tuple] = {}
+    pred_team: dict[int, str] = {}
+    pred_start_fid = None  # first frame for which predictions exist (the snap)
+    if want_pred:
+        pp = predicted_positions(game_id, play_id)
+        if pp is not None and not pp.empty:
+            for r in pp.itertuples(index=False):
+                pred_lookup[(int(r.nflId), int(r.frameId))] = (r.px, r.py)
+            pred_start_fid = int(pp["frameId"].min())
+            tmap = (play[play["team"] != BALL_LABEL]
+                    .dropna(subset=["nflId"])
+                    .drop_duplicates("nflId")[["nflId", "team"]])
+            pred_team = {int(n): t for n, t in
+                         zip(tmap["nflId"], tmap["team"])}
+    # if predicted mode was requested but nothing came back, fall back to actual
+    if want_pred and not pred_lookup:
+        want_pred = False
+        pred_only = False
+
     # play outcome from plays.csv, matched on gameId+playId
     info = play_info(game_id, play_id)
     result_txt = _result_text(info["playResult"])
@@ -298,6 +467,10 @@ def build_figure(game_id: str, play_id: int) -> go.Figure:
         pass_label = PASS_RESULT_MAP.get(info["passResult"],
                                          (info["passResult"], ""))[0]
         result_txt = f"{pass_label}  ·  {result_txt}"
+    # make the active view + data split obvious in the title
+    mode_tag = {"pred": "PREDICTED", "both": "ACTUAL + PREDICTED"}.get(mode, "ACTUAL")
+    split_tag = SPLIT_META[game_split_label(game_id)][0]  # TRAIN / TEST / UNSEEN
+    result_txt = f"[{mode_tag} · {split_tag} game]  ·  {result_txt}"
 
     # team ordering: football last; two real teams get stable colours
     teams = [t for t in play["team"].unique().tolist() if t != BALL_LABEL]
@@ -305,32 +478,58 @@ def build_figure(game_id: str, play_id: int) -> go.Figure:
     color_for = {t: TEAM_COLORS[i % len(TEAM_COLORS)] for i, t in enumerate(teams)}
     color_for[BALL_LABEL] = BALL_COLOR
 
+    def _pred_xy_for_team(t: str, fid: int):
+        """Predicted (x list, y list, jersey list) for a team at a frame, in the
+        same player order as the tracking rows (so jersey labels line up)."""
+        sub = play[(play["frameId"] == fid) & (play["team"] == t)]
+        xs, ys, nums = [], [], []
+        for r in sub.itertuples(index=False):
+            if pd.isna(r.nflId):
+                continue
+            pos = pred_lookup.get((int(r.nflId), fid))
+            if pos is None:
+                # before the snap there is no prediction yet; fall back to the
+                # actual position so the play starts from the real formation.
+                pos = (r.x, r.y)
+            xs.append(pos[0]); ys.append(pos[1])
+            nums.append(r.jerseyNumber)
+        return xs, ys, nums
+
     def frame_traces(fid: int) -> list[go.Scatter]:
         f = play[play["frameId"] == fid]
         traces = []
-        # one marker trace per team (so the legend shows team names)
+        # primary solid markers per team. In 'pred' mode these ARE the model's
+        # predicted positions; otherwise they are the actual tracking positions.
         for t in teams:
             sub = f[f["team"] == t]
+            if pred_only:
+                px, py, nums = _pred_xy_for_team(t, fid)
+                num_text = pd.Series(nums).astype("Int64").astype(str)
+                suffix = " (pred)"
+            else:
+                px, py = sub["x"], sub["y"]
+                num_text = sub["jerseyNumber"].astype("Int64").astype(str)
+                suffix = ""
             traces.append(go.Scatter(
-                x=sub["x"], y=sub["y"], mode="markers+text",
+                x=px, y=py, mode="markers+text",
                 marker=dict(size=16, color=color_for[t],
                             line=dict(color="white", width=1)),
-                text=sub["jerseyNumber"].astype("Int64").astype(str),
+                text=num_text,
                 textposition="middle center",
                 textfont=dict(color="white", size=9),
-                name=t, legendgroup=t,
-                hovertemplate=(f"{t}<br>#%{{text}}<br>"
+                name=f"{t}{suffix}", legendgroup=t,
+                hovertemplate=(f"{t}{suffix}<br>#%{{text}}<br>"
                                "x=%{x:.1f}, y=%{y:.1f}<extra></extra>"),
             ))
-            # orientation ticks for this team
-            if not sub.empty:
+            # orientation ticks: only meaningful for actual positions
+            if not pred_only and not sub.empty:
                 ox, oy = _orientation_segments(sub)
                 traces.append(go.Scatter(
                     x=ox, y=oy, mode="lines",
                     line=dict(color=color_for[t], width=1),
                     hoverinfo="skip", showlegend=False, legendgroup=t,
                 ))
-        # the ball
+        # the ball (always from actual tracking; the model doesn't predict it)
         ball = f[f["team"] == BALL_LABEL]
         traces.append(go.Scatter(
             x=ball["x"], y=ball["y"], mode="markers",
@@ -338,20 +537,47 @@ def build_figure(game_id: str, play_id: int) -> go.Figure:
                         line=dict(color="white", width=1)),
             name="ball", hovertemplate="ball<br>x=%{x:.1f}, y=%{y:.1f}<extra></extra>",
         ))
+
+        # 'both' mode only: predicted ghosts overlaid on the actual markers.
+        if mode == "both" and pred_lookup:
+            gx_by_team: dict[str, list] = {t: [] for t in teams}
+            gy_by_team: dict[str, list] = {t: [] for t in teams}
+            for nid, team in pred_team.items():
+                pos = pred_lookup.get((nid, fid))
+                if pos is None or team not in gx_by_team:
+                    continue
+                gx_by_team[team].append(pos[0])
+                gy_by_team[team].append(pos[1])
+            for t in teams:
+                if not gx_by_team[t]:
+                    continue
+                traces.append(go.Scatter(
+                    x=gx_by_team[t], y=gy_by_team[t], mode="markers",
+                    marker=dict(size=15, symbol="circle-open",
+                                color=color_for[t],
+                                line=dict(color=color_for[t], width=2),
+                                opacity=0.55),
+                    name=f"{t} (pred)", legendgroup=f"{t}-pred",
+                    hovertemplate=(f"{t} predicted<br>"
+                                   "x=%{x:.1f}, y=%{y:.1f}<extra></extra>"),
+                ))
         return traces
 
     # initial data = first frame
     init_traces = frame_traces(frames_ids[0])
 
-    # animation frames
+    # animation frames retain the static yard-number annotations.
+    static_anns = yardline_annotations()
     go_frames = []
     for fid in frames_ids:
         ev = play[play["frameId"] == fid]["event"].iloc[0]
         ev_txt = "" if ev in (None, "None", "nan") else f"  |  event: {ev}"
         go_frames.append(go.Frame(
             data=frame_traces(fid), name=str(fid),
-            layout=go.Layout(title_text=_title(game_id, play_id, fid,
-                                               len(frames_ids), ev_txt, result_txt)),
+            layout=go.Layout(
+                title_text=_title(game_id, play_id, fid,
+                                  len(frames_ids), ev_txt, result_txt),
+                annotations=static_anns),
         ))
 
     fig = go.Figure(data=init_traces, frames=go_frames)
@@ -436,7 +662,7 @@ def _title(game_id, play_id, fid, nframes, extra, result="") -> str:
 
 # ---- Dash app ---------------------------------------------------------------
 app = Dash(__name__)
-app.title = "NFL Play Visualiser"
+app.title = "NFL Big Data Bowl — Play Visualiser"
 
 # Global dark theme + card styling. Injected at the page level so the dropdown
 # menus, scrollbars and body background are themed too, not just components.
@@ -449,41 +675,64 @@ app.index_string = """<!DOCTYPE html>
     {%css%}
     <style>
         :root {
-            --bg-page: #0b0f17;
-            --bg-surface: #141b26;
-            --bg-surface-2: #1c2634;
-            --border: #263142;
-            --text: #e6edf3;
-            --text-muted: #8b98a9;
-            --accent: #38bdf8;
+            --nfl-blue: #013369;
+            --nfl-red: #D50A0A;
+            --bg-page: #f4f6f8;
+            --bg-surface: #ffffff;
+            --bg-surface-2: #ffffff;
+            --border: #d4dae2;
+            --text: #0b1220;
+            --text-muted: #5b6775;
+            --accent: #D50A0A;
         }
         * { box-sizing: border-box; }
         body {
             margin: 0;
-            background:
-                radial-gradient(1200px 600px at 15% -10%, #16202e 0%, rgba(22,32,46,0) 60%),
-                radial-gradient(1000px 500px at 110% 10%, #10212b 0%, rgba(16,33,43,0) 55%),
-                var(--bg-page);
+            background: var(--bg-page);
             color: var(--text);
             font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
             -webkit-font-smoothing: antialiased;
         }
         .app-shell { max-width: 1120px; margin: 0 auto; padding: 32px 20px 48px; }
-        .app-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 22px; }
-        .app-title { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; margin: 0; }
-        .app-subtitle { font-size: 13px; color: var(--text-muted); margin: 0; }
+
+        /* NFL-branded header banner */
+        .app-header {
+            display: flex; align-items: center; gap: 16px; margin-bottom: 22px;
+            background: linear-gradient(90deg, var(--nfl-blue) 0%, #012a56 100%);
+            border-radius: 16px; padding: 20px 24px;
+            box-shadow: 0 8px 24px rgba(1,51,105,0.25);
+            border-bottom: 4px solid var(--nfl-red);
+        }
+        .app-shield {
+            width: 44px; height: 56px; flex: 0 0 auto;
+            display: inline-flex; align-items: center; justify-content: center;
+            background: #ffffff; color: var(--nfl-blue);
+            border-radius: 8px 8px 20px 20px; border: 2px solid var(--nfl-red);
+            font-weight: 800; font-size: 11px; letter-spacing: 0.04em;
+            line-height: 1; text-align: center;
+        }
+        .app-header-text { display: flex; flex-direction: column; gap: 4px; }
+        .app-title {
+            font-size: 23px; font-weight: 800; letter-spacing: -0.01em;
+            margin: 0; color: #ffffff; text-transform: uppercase;
+        }
+        .app-title .accent { color: var(--nfl-red); }
+        .app-subtitle { font-size: 13px; color: #c7d2e0; margin: 0; }
         .card {
             background: var(--bg-surface);
             border: 1px solid var(--border);
             border-radius: 16px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.03);
+            box-shadow: 0 6px 20px rgba(1,51,105,0.08);
         }
-        .controls-card { padding: 18px 20px; margin-bottom: 20px; }
+        .controls-card {
+            padding: 18px 20px; margin-bottom: 20px;
+            border-top: 3px solid var(--nfl-blue);
+        }
         .controls-row { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-end; }
         .control { display: flex; flex-direction: column; gap: 6px; }
         .control-label {
-            font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
-            text-transform: uppercase; color: var(--text-muted);
+            font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
+            text-transform: uppercase; color: var(--nfl-blue);
         }
         /* the pitch island */
         .pitch-card { padding: 14px 14px 6px; }
@@ -493,33 +742,34 @@ app.index_string = """<!DOCTYPE html>
         }
         .legend-chip { display: inline-flex; align-items: center; gap: 7px; }
         .dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block;
-               border: 1px solid rgba(255,255,255,0.4); }
+               border: 1px solid rgba(0,0,0,0.25); }
         .diamond { width: 10px; height: 10px; display: inline-block; transform: rotate(45deg);
-                   border: 1px solid rgba(255,255,255,0.4); }
+                   border: 1px solid rgba(0,0,0,0.25); }
 
-        /* Dark-theme the dash dropdowns (react-select) */
+        /* Dash dropdowns (react-select): white background, BLACK text */
         .Select-control, .is-focused:not(.is-open) > .Select-control {
-            background: var(--bg-surface-2) !important;
+            background: #ffffff !important;
             border: 1px solid var(--border) !important;
             border-radius: 10px !important;
-            color: var(--text) !important;
+            color: #000000 !important;
             box-shadow: none !important;
         }
         .Select-menu-outer {
-            background: var(--bg-surface-2) !important;
+            background: #ffffff !important;
             border: 1px solid var(--border) !important;
             border-radius: 10px !important;
-            color: var(--text) !important;
+            color: #000000 !important;
             overflow: hidden;
         }
         .Select-value-label, .Select-placeholder, .Select input > input,
-        .Select-value { color: var(--text) !important; }
+        .Select-value { color: #000000 !important; }
         .VirtualizedSelectOption, .Select-option {
-            background: var(--bg-surface-2) !important;
-            color: var(--text) !important;
+            background: #ffffff !important;
+            color: #000000 !important;
         }
         .VirtualizedSelectFocusedOption, .Select-option.is-focused {
-            background: #223047 !important;
+            background: #e8eef6 !important;
+            color: #000000 !important;
         }
         .Select-arrow { border-color: var(--text-muted) transparent transparent; }
 
@@ -528,19 +778,30 @@ app.index_string = """<!DOCTYPE html>
         .result-badge {
             display: inline-flex; flex-direction: column; gap: 2px;
             padding: 8px 16px; border-radius: 10px;
-            background: var(--bg-surface-2); border: 1px solid var(--border);
+            background: #f7f9fc; border: 1px solid var(--border);
             min-width: 120px;
         }
         .result-label {
-            font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
-            text-transform: uppercase; color: var(--text-muted);
+            font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+            text-transform: uppercase; color: var(--nfl-blue);
         }
-        .result-value { font-size: 20px; font-weight: 700; line-height: 1.1; }
-        .result-gain { color: #4ade80; }   /* green for positive yards */
-        .result-loss { color: #fb7185; }   /* rose for negative yards */
+        .result-value { font-size: 20px; font-weight: 800; line-height: 1.1;
+                        color: var(--text); }
+        .result-gain { color: #1a8f3c; }   /* green for positive yards */
+        .result-loss { color: var(--nfl-red); }   /* NFL red for negative yards */
         .result-zero { color: var(--text-muted); }
+
+        /* view-mode radio (Actual / Predicted / Both) */
+        .view-mode {
+            display: inline-flex; align-items: center;
+            font-size: 13px; color: var(--text);
+            background: #ffffff; border: 1px solid var(--border);
+            border-radius: 10px; padding: 7px 12px; white-space: nowrap;
+        }
+        .view-mode label { cursor: pointer; }
+        .view-mode input { accent-color: var(--nfl-blue); }
         ::-webkit-scrollbar { width: 10px; height: 10px; }
-        ::-webkit-scrollbar-thumb { background: #2a3647; border-radius: 8px; }
+        ::-webkit-scrollbar-thumb { background: #c3ccd8; border-radius: 8px; }
         ::-webkit-scrollbar-track { background: transparent; }
     </style>
 </head>
@@ -554,15 +815,54 @@ _initial_game = GAME_IDS[0] if GAME_IDS else None
 _initial_play_opts = play_options(_initial_game) if _initial_game else []
 _initial_play = _initial_play_opts[0]["value"] if _initial_play_opts else None
 
+# whether the trained predictor + saved models are usable (controls the toggle)
+_PRED_READY = predictions_available()
+_PRED_NOTE = "" if _PRED_READY else (_PRED["reason"] or "unavailable")
+
+
+def _game_options() -> list[dict]:
+    """Game dropdown options, each prefixed with its train/test/unseen state."""
+    marks = {"train": "● train", "test": "● test", "unseen": "○ unseen"}
+    opts = []
+    for g in GAME_IDS:
+        lbl = game_split_label(g)
+        opts.append({"label": f"{g}   {marks[lbl]}", "value": g})
+    return opts
+
+
+def _split_badge_children(game_id):
+    """Children for the train/test split badge for the current game."""
+    lbl = game_split_label(game_id) if game_id is not None else "unseen"
+    short, tip, color = SPLIT_META[lbl]
+    return [
+        html.Span("Data split", className="result-label"),
+        html.Span(short, className="result-value",
+                  style={"color": color}, title=tip),
+    ]
+
+
 app.layout = html.Div(
     className="app-shell",
     children=[
         html.Div(
             className="app-header",
             children=[
-                html.H1("NFL Play Visualiser", className="app-title"),
-                html.P("Big Data Bowl — player tracking, frame by frame",
-                       className="app-subtitle"),
+                html.Div("NFL", className="app-shield"),
+                html.Div(
+                    className="app-header-text",
+                    children=[
+                        html.H1(
+                            className="app-title",
+                            children=[
+                                "Big Data Bowl ",
+                                html.Span("Play Visualiser", className="accent"),
+                            ],
+                        ),
+                        html.P("Next Gen Stats player tracking, frame by frame "
+                               "· powered by AWS",
+                               className="app-subtitle"),
+                    ],
+                ),
             ],
         ),
         # controls island
@@ -576,11 +876,11 @@ app.layout = html.Div(
                             html.Span("Game", className="control-label"),
                             dcc.Dropdown(
                                 id="game-dropdown",
-                                options=[{"label": g, "value": g} for g in GAME_IDS],
+                                options=_game_options(),
                                 value=_initial_game, clearable=False,
                                 style={"width": "240px"}),
                         ]),
-                        html.Div(className="control", style={"flex": "1 1 360px"},
+                        html.Div(className="control", style={"flex": "1 1 300px"},
                                  children=[
                             html.Span("Play", className="control-label"),
                             dcc.Dropdown(
@@ -588,8 +888,27 @@ app.layout = html.Div(
                                 options=_initial_play_opts,
                                 value=_initial_play, clearable=False),
                         ]),
-                        html.Div(id="result-badges", className="result-badges",
+                        html.Div(className="control", children=[
+                            html.Span("View", className="control-label"),
+                            dcc.RadioItems(
+                                id="view-mode",
+                                className="view-mode",
+                                options=[
+                                    {"label": " Actual", "value": "actual"},
+                                    {"label": (" Predicted" if _PRED_READY
+                                               else f" Predicted ({_PRED_NOTE})"),
+                                     "value": "pred", "disabled": not _PRED_READY},
+                                    {"label": " Both", "value": "both",
+                                     "disabled": not _PRED_READY},
+                                ],
+                                value="actual",
+                                inputStyle={"marginRight": "5px"},
+                                labelStyle={"marginRight": "12px"}),
+                        ]),
+                        html.Div(id="split-badge", className="result-badge",
                                  style={"marginLeft": "auto"},
+                                 children=_split_badge_children(_initial_game)),
+                        html.Div(id="result-badges", className="result-badges",
                                  children=_badges_children(
                                      _initial_game, _initial_play)),
                     ],
@@ -620,7 +939,18 @@ app.layout = html.Div(
                             html.Span(className="diamond",
                                       style={"background": BALL_COLOR}),
                             "Ball"]),
-                        html.Span("Press ▶ Play to animate · tick = player orientation"),
+                        html.Span(className="legend-chip", children=[
+                            html.Span(className="dot",
+                                      style={"background": "transparent",
+                                             "border": f"2px solid {TEXT_MUTED}"}),
+                            "Predicted (ghost, in Both view)"]),
+                        html.Span("Press ▶ Play to animate · use View to switch "
+                                  "between actual tracking and the model's "
+                                  "predicted play"),
+                        html.Span("Data split: ● train (model saw it) · "
+                                  "● test (held out, unseen) · ○ unseen "
+                                  "(not in the model's run)",
+                                  style={"color": TEXT_MUTED}),
                     ],
                 ),
             ],
@@ -645,13 +975,19 @@ def _update_plays(game_id):
 @app.callback(
     Output("field-graph", "figure"),
     Output("result-badges", "children"),
+    Output("split-badge", "children"),
     Input("game-dropdown", "value"),
     Input("play-dropdown", "value"),
+    Input("view-mode", "value"),
 )
-def _update_figure(game_id, play_id):
+def _update_figure(game_id, play_id, view_mode):
     if game_id is None or play_id is None:
-        return go.Figure(), _badges_children(None, None)
-    return build_figure(game_id, int(play_id)), _badges_children(game_id, play_id)
+        return (go.Figure(), _badges_children(None, None),
+                _split_badge_children(None))
+    mode = view_mode if view_mode in ("actual", "pred", "both") else "actual"
+    return (build_figure(game_id, int(play_id), mode=mode),
+            _badges_children(game_id, play_id),
+            _split_badge_children(game_id))
 
 
 if __name__ == "__main__":

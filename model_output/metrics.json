@@ -1,0 +1,16 @@
+{
+  "n_player_frames": 3498,
+  "model_mean_dist_err_yd": 2.8623598687897682,
+  "model_rmse_dist_yd": 4.266454893741319,
+  "baseline_mean_dist_err_yd": 3.538127638202778,
+  "baseline_rmse_dist_yd": 4.990769679988907,
+  "train_games": [
+    2021091200,
+    2021091201
+  ],
+  "test_games": [
+    2021090900
+  ],
+  "per_horizon": false,
+  "improvement_vs_baseline_pct": 19.099587084322145
+}

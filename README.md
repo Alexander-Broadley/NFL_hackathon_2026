@@ -1,4 +1,7 @@
 We use a machine learning (XGBoost) model to take the next generation play tracking data and predict player movements across both teams from their pre-snap positions. An interactive webpage allows you to visualise the actual and predicted play, making it clear whether or not the model was trained on the play in question. This could be useful for broadcasters, as well as offensive and defensive coordinators looking to make last minute tactical adjustments to give them a competitive edge.
+
+We were required to use the Kiro IDE as part of the competition, so agentic AI was used in code generation and instruction generation.
+
 ## Play Visualiser (web app)
 
 An interactive Dash web app that animates NFL Big Data Bowl player tracking
